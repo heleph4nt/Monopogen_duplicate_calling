@@ -1,4 +1,7 @@
 # Monopogen: SNV calling from single cell sequencing data
+
+## This is a group project for medical genomics
+
 ## News
 * 10/24/2024:
   * Resolve the issue by incorporating duplicate reads in the SNV calling.
