@@ -1,6 +1,38 @@
 # Monopogen: SNV calling from single cell sequencing data
 
-## This is a group project for medical genomics
+## Medical genomics section (new-ish readme)
+
+### For making this work on a macos laptop.
+
+```{bash}
+conda create -n Monopogen # create a conda environment
+conda activate Monopogen # activate it 
+pip install -e . # This installs all the tools.
+```
+
+Monopogen uses tools like samtools which are provided in the apps directory. However, these files are not executable for Macs. This is how to fix that:
+
+```{bash}
+conda install bioconda::samtools
+ln -sf $(which samtools) apps/samtools # replaces the samtools executable with one that we installed from conda.
+```
+
+PreProcessing step: I got warnings that the bam index files (.bam.bai) was older than the .bam file, so i did this:
+```{bash}
+samtools index example/A.bam
+```
+
+The input with the tab `-b` is a file that looks like this: 
+```
+ID1,./example/A.bam
+```
+
+Then, do this:
+```{bash}
+python3 src/Monopogen.py preProcess -b example/bam.lst -o out -a apps
+```
+
+Where `example/bam.lst` is the previously mentioned file; `out` is the directory to save the results into and `apps` is the apps folder in the repository.
 
 ## News
 * 10/24/2024:

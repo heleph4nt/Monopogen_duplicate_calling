@@ -1,0 +1,3 @@
+apps/samtools
+out/*
+src/__pycache__/*
