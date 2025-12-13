@@ -142,7 +142,7 @@ def somatic(args):
 		for line in f_in:
 			record = line.strip().split(",")
 			if(len(record)==1):
-			 	region = record[0]
+				region = record[0]
 			if(len(record)==3):
 				region = record[0] + ":" + record[1] + "-" + record[2]
 			chr_lst.append(record[0])

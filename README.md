@@ -17,7 +17,9 @@ conda install bioconda::samtools
 ln -sf $(which samtools) apps/samtools # replaces the samtools executable with one that we installed from conda.
 ```
 
-PreProcessing step: I got warnings that the bam index files (.bam.bai) was older than the .bam file, so i did this:
+## PreProcessing step: 
+
+I got warnings that the bam index files (.bam.bai) was older than the .bam file, so i did this:
 ```{bash}
 samtools index example/A.bam
 ```
@@ -33,6 +35,15 @@ python3 src/Monopogen.py preProcess -b example/bam.lst -o out -a apps
 ```
 
 Where `example/bam.lst` is the previously mentioned file; `out` is the directory to save the results into and `apps` is the apps folder in the repository.
+
+### What does this do?
+
+In `out`, there is now a `.bam`, `.bam.bai`  and a `.bam.lst` file (which contains the path to the `.bam` file) for each chromosome (1-22, i suppose this is ignoring sex chromosomes.)
+
+From looking at the code, it seems that splitting the bams into chromosomes is all that happens in this function.
+
+
+
 
 ## News
 * 10/24/2024:
