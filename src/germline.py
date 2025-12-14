@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 
+# This file implements the germline SNV calling pipeline in Monopogen.
+# It handles input validation, dependency checking, BAM preprocessing,
+# and filtering of reads prior to LD-based genotyping and refinement.
+
 import argparse
 import sys
 import os
@@ -14,216 +18,270 @@ import pandas as pd
 import numpy as np
 import gzip
 from pysam import VariantFile
-from bamProcess import * 
+from bamProcess import *
 import multiprocessing as mp
 from multiprocessing import Pool
 
 
+# Path to internal pipeline libraries
 LIB_PATH = os.path.abspath(
-	os.path.join(os.path.dirname(os.path.realpath(__file__)), "pipelines/lib"))
+    os.path.join(os.path.dirname(os.path.realpath(__file__)), "pipelines/lib"))
 
+# Ensure internal libraries are discoverable
 if LIB_PATH not in sys.path:
-	sys.path.insert(0, LIB_PATH)
+    sys.path.insert(0, LIB_PATH)
 
+# Pipeline directories
 PIPELINE_BASEDIR = os.path.dirname(os.path.realpath(sys.argv[0]))
 CFG_DIR = os.path.join(PIPELINE_BASEDIR, "cfg")
 
-#import pipelines
-#from pipelines import get_cluster_cfgfile
-#from pipelines import PipelineHandler
 
-# global logger
+# Global logger
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 handler = logging.StreamHandler()
 handler.setFormatter(logging.Formatter(
-	'[{asctime}] {levelname:8s} {filename} {message}', style='{'))
+    '[{asctime}] {levelname:8s} {filename} {message}', style='{'))
 logger.addHandler(handler)
 
 
 def print_parameters_given(args):
-	logger.info("Parameters in effect:")
-	for arg in vars(args):
-		if arg=="func": continue
-		logger.info("--{} = [{}]".format(arg, vars(args)[arg]))
+    # Print all user-specified parameters (except function handler)
+    # Useful for reproducibility and debugging.
+    logger.info("Parameters in effect:")
+    for arg in vars(args):
+        if arg == "func":
+            continue
+        logger.info("--{} = [{}]".format(arg, vars(args)[arg]))
 
 
 def validate_sample_list_file(args):
-	if args.check_hard_clipped:
-		out=os.popen("command -v bioawk").read().strip()
-		assert out!="", "Program bioawk cannot be found!"
+    # Validate the sample list file, which specifies:
+    # sample_name, absolute_path_to_bam, contamination_rate
+    #
+    # This function ensures:
+    # - BAM files exist and are indexed
+    # - Absolute paths are used
+    # - Contamination rates are valid
+    # - Optional check for improper hard-clipped reads
 
-	assert os.path.isfile(args.sample_list), "Sample index file {} cannot be found!".format(args.sample_list)
+    if args.check_hard_clipped:
+        out = os.popen("command -v bioawk").read().strip()
+        assert out != "", "Program bioawk cannot be found!"
 
-	try:
-		with open(args.sample_list) as f_in:
-			for line in f_in:
-				record = line.strip().split("\t")
-				logger.debug("Checking sample {}".format(record[0]))
-				assert len(record)==3, "Every line has to have exactly 3 tab-delimited columns! Line with sample name {} does not satisify this requiremnt!".format(record[0])
-				assert os.path.isfile(record[1]), "Bam file {} cannot be found!".format(record[1])
-				assert os.path.isfile(record[1]+".bai"), "Bam file {} has not been indexed!".format(record[1])
-				assert os.path.isabs(record[1]), "Please use absolute path for bam file {}!".format(record[1])
+    assert os.path.isfile(args.sample_list), \
+        "Sample index file {} cannot be found!".format(args.sample_list)
 
-				if args.check_hard_clipped:
-					logger.debug("Checking existence of hard-clipped reads.")
-					cmd = "samtools view {} | bioawk -c sam 'BEGIN {{count=0}} ($cigar ~ /H/)&&(!and($flag,256)) {{count++}} END {{print count}}'".format(record[1])
-					logger.debug("Command: "+cmd)
-					out=os.popen(cmd).read().strip()
-					logger.debug("Results: "+out)
-					assert out=="0", "Bam file {} contains hard-clipped reads without proper flag (0x100) set! Please use -M or -Y options of BWA MEM!".format(record[1])
+    try:
+        with open(args.sample_list) as f_in:
+            for line in f_in:
+                record = line.strip().split("\t")
+                logger.debug("Checking sample {}".format(record[0]))
 
-				try:
-					float(record[2])
-					assert 0.0 <= float(record[2]) and float(record[2]) <= 1.0, "Contamination rate of sample {0} has to be a float number between 0 and 1 instead of {1}!".format(record[0], record[2])
-				except:
-					logger.error("Contamination rate of sample {0} has to be a float number between 0 and 1 instead of {1}!".format(record[0], record[2]))
-					exit(1)
+                # Each line must have exactly 3 fields
+                assert len(record) == 3, \
+                    "Sample {} does not have exactly 3 columns!".format(record[0])
 
-	except Exception:
-		logger.error("There is something wrong with the sample index file. Check the logs for more information.")
-		print(sys.exc_info())
-            
-		raise sys.exc_info()[0]
+                # BAM file existence and indexing
+                assert os.path.isfile(record[1]), \
+                    "Bam file {} cannot be found!".format(record[1])
+                assert os.path.isfile(record[1] + ".bai"), \
+                    "Bam file {} has not been indexed!".format(record[1])
+                assert os.path.isabs(record[1]), \
+                    "Please use absolute path for bam file {}!".format(record[1])
+
+                # Optional check for improper hard-clipped reads
+                if args.check_hard_clipped:
+                    logger.debug("Checking existence of hard-clipped reads.")
+                    cmd = (
+                        "samtools view {} | bioawk -c sam "
+                        "'BEGIN {{count=0}} ($cigar ~ /H/)&&(!and($flag,256)) "
+                        "{{count++}} END {{print count}}'"
+                    ).format(record[1])
+                    out = os.popen(cmd).read().strip()
+                    assert out == "0", \
+                        "Bam file {} contains hard-clipped reads!".format(record[1])
+
+                # Validate contamination rate
+                try:
+                    cr = float(record[2])
+                    assert 0.0 <= cr <= 1.0
+                except:
+                    logger.error(
+                        "Invalid contamination rate for sample {}: {}".format(
+                            record[0], record[2]
+                        )
+                    )
+                    exit(1)
+
+    except Exception:
+        logger.error("There is something wrong with the sample index file.")
+        print(sys.exc_info())
+        raise sys.exc_info()[0]
 
 
 def validate_user_setting_germline(args):
-	#assert os.path.isfile(args.bamFile), "The bam list file {} cannot be found!".format(args.bamFile)
-	assert os.path.isfile(args.reference), "The genome reference fasta file {} cannot be found!".format(args.reference)
-	assert os.path.isdir(args.imputation_panel), "Filtered genotype file of 1KG3 ref panel {} cannot be found!".format(args.imputation_panel)
-	assert os.path.isfile(args.region), "The region file {} cannot be found!".format(args.region)
-	# check whether each bam file available	
-	for chr in range(1, 23):
-		bamFile = args.out + "/Bam/chr" +  str(chr) +  ".filter.bam.lst"
-		with open(bamFile) as f_in:
-			for line in f_in:
-				line = line.strip()
-				assert os.path.isfile(line), "The bam file {} cannot be found!".format(line)
-				assert os.path.isfile(line + ".bai"), "The bam.bai file {} cannot be found!".format(line)
-	# check whether region files were set correctly 
-	with open(args.region) as f_in:
-		for line in f_in:
-			record = line.strip().split(",")
-			assert len(record)==3 or len(record)==1, "Every line has to have exactly 3 comma-delimited columns chr1,1,100000 or chr1 (on the whole chromosome)! Line with region {} does not satisify this requiremnt!".format(line)
+    # Validate user inputs required for germline SNV calling:
+    # - Reference genome
+    # - Imputation (LD) panel
+    # - Region file
+    # - Per-chromosome BAM lists
+
+    assert os.path.isfile(args.reference), \
+        "Reference genome {} cannot be found!".format(args.reference)
+    assert os.path.isdir(args.imputation_panel), \
+        "Imputation panel {} cannot be found!".format(args.imputation_panel)
+    assert os.path.isfile(args.region), \
+        "Region file {} cannot be found!".format(args.region)
+
+    # Check per-chromosome BAM lists
+    for chr in range(1, 23):
+        bamFile = args.out + "/Bam/chr" + str(chr) + ".filter.bam.lst"
+        with open(bamFile) as f_in:
+            for line in f_in:
+                line = line.strip()
+                assert os.path.isfile(line), \
+                    "Bam file {} cannot be found!".format(line)
+                assert os.path.isfile(line + ".bai"), \
+                    "Index file {}.bai cannot be found!".format(line)
+
+    # Validate region file format
+    with open(args.region) as f_in:
+        for line in f_in:
+            record = line.strip().split(",")
+            assert len(record) == 3 or len(record) == 1, \
+                "Invalid region specification: {}".format(line)
 
 
 def check_dependencies(args):
-	programs_to_check = ("vcftools", "bgzip",  "bcftools", "beagle.27Jul16.86a.jar","samtools","picard.jar", "java")
+    # Check availability of required external tools
+    programs_to_check = (
+        "vcftools", "bgzip", "bcftools",
+        "beagle.27Jul16.86a.jar", "samtools",
+        "picard.jar", "java"
+    )
 
-	for prog in programs_to_check:
-		out = os.popen("command -v {}".format(args.app_path + "/" + prog)).read()
-		assert out != "", "Program {} cannot be found!".format(prog)
-
-#	python_pkgs_to_check = ("drmaa",)
-
-#	for pkg in python_pkgs_to_check:
-#		out_pipe = os.popen('python -c "import {}"'.format(pkg))
-
-#		assert out_pipe.close() is None, "Python module {} has not been installed!".format(pkg)
-
+    for prog in programs_to_check:
+        out = os.popen("command -v {}".format(args.app_path + "/" + prog)).read()
+        assert out != "", "Program {} cannot be found!".format(prog)
 
 
 def addChr(in_bam, samtools):
-	# edit the sequence names for your output header
-	prefix = 'chr'
-	out_bam=in_bam+"tmp.bam"
-	input_bam = pysam.AlignmentFile(in_bam,"rb")
-	new_head = input_bam.header.to_dict()
-	for seq in new_head['SQ']:
-		seq['SN'] = prefix  + seq['SN']
-	# create output BAM with newly defined header
-	with pysam.AlignmentFile(out_bam, "wb", header=new_head) as outf:
-		for read in input_bam.fetch():
-			prefixed_chrom = prefix + read.reference_name
-			a = pysam.AlignedSegment(outf.header)
-			a.query_name = read.query_name
-			a.query_sequence = read.query_sequence
-			a.reference_name = prefixed_chrom
-			a.flag = read.flag
-			a.reference_start = read.reference_start
-			a.mapping_quality = read.mapping_quality
-			a.cigar = read.cigar
-			a.next_reference_id = read.next_reference_id
-			a.next_reference_start = read.next_reference_start
-			a.template_length = read.template_length
-			a.query_qualities = read.query_qualities
-			a.tags = read.tags
-			outf.write(a)
-	input_bam.close()
-	outf.close()
-	os.system(samtools + " index " +  out_bam)
-	os.system(" mv " + out_bam + " " + in_bam)
-	os.system(" mv " + out_bam + ".bai  " + in_bam + ".bai")
+    # Add "chr" prefix to contig names in a BAM file.
+    # This ensures consistency with reference genomes and panels.
 
+    prefix = 'chr'
+    out_bam = in_bam + "tmp.bam"
+
+    input_bam = pysam.AlignmentFile(in_bam, "rb")
+    new_head = input_bam.header.to_dict()
+
+    for seq in new_head['SQ']:
+        seq['SN'] = prefix + seq['SN']
+
+    with pysam.AlignmentFile(out_bam, "wb", header=new_head) as outf:
+        for read in input_bam.fetch():
+            a = pysam.AlignedSegment(outf.header)
+            a.query_name = read.query_name
+            a.query_sequence = read.query_sequence
+            a.reference_name = prefix + read.reference_name
+            a.flag = read.flag
+            a.reference_start = read.reference_start
+            a.mapping_quality = read.mapping_quality
+            a.cigar = read.cigar
+            a.next_reference_id = read.next_reference_id
+            a.next_reference_start = read.next_reference_start
+            a.template_length = read.template_length
+            a.query_qualities = read.query_qualities
+            a.tags = read.tags
+            outf.write(a)
+
+    input_bam.close()
+    outf.close()
+
+    os.system(samtools + " index " + out_bam)
+    os.system("mv " + out_bam + " " + in_bam)
+    os.system("mv " + out_bam + ".bai " + in_bam + ".bai")
 
 
 def BamFilter(myargs):
-	bamFile = myargs.get("bamFile")
-	search_chr = myargs.get("chr")
-	samtools = myargs.get("samtools")
-	chr = search_chr
-	id = myargs.get("id")
-	#samtools = myargs.get("samtools")
-	max_mismatch = myargs.get("max_mismatch")
-	out = myargs.get("out")
+    # Filter reads from a BAM file for a given chromosome based on
+    # maximum allowed mismatches (NM / nM tag).
+    #
+    # This reduces sequencing errors prior to SNV calling.
 
-	os.system("mkdir -p " + out +  "/Bam")
-	infile = pysam.AlignmentFile(bamFile,"rb")
-	contig_names = infile.references
-	cnt=0 
-	for contig in contig_names:
-		if contig.startswith("chr"):
-			cnt=cnt+1
-	if cnt==0:
-			logger.info("The contig {} does not contain the prefix 'chr' and we will add 'chr' on it ".format(search_chr))
-			search_chr = search_chr[3:]
-			#searchBam = args.bamFile+".bam"
-			#addChr(args.bamFile, searchBam)
-			#infile.close()
-			#infile = pysam.AlignmentFile(searchBam,"rb")
+    bamFile = myargs.get("bamFile")
+    search_chr = myargs.get("chr")
+    samtools = myargs.get("samtools")
+    id = myargs.get("id")
+    max_mismatch = myargs.get("max_mismatch")
+    out = myargs.get("out")
 
-	tp =infile.header.to_dict()
-			
-	#print(tp)
-	#To avoid the format issue, we update the RG flag based on sample information
-	#if not "RG" in tp:
-	sampleID = os.path.splitext(os.path.basename(myargs["bamFile"]))[0]
-	tp1 = [{'SM':sampleID,'ID':sampleID, 'LB':"0.1", 'PL':"ILLUMINA", 'PU':sampleID}]
-	tp.update({'RG': tp1})
-		#print(tp)
-		#tp['RG'][0]['SM'] = 
-		#tp['RG'][0]['ID'] = os.path.splitext(os.path.basename(args.bamFile))[0]
-  
-	outfile =  pysam.AlignmentFile( out + "/Bam/" +id + "_" + chr + ".filter.bam", "wb", header=tp)
+    os.system("mkdir -p " + out + "/Bam")
+
+    infile = pysam.AlignmentFile(bamFile, "rb")
+
+    # Detect whether contigs already have "chr" prefix
+    contig_names = infile.references
+    has_chr_prefix = any(contig.startswith("chr") for contig in contig_names)
+
+    if not has_chr_prefix:
+        logger.info(
+            "Contig {} does not contain 'chr' prefix; adjusting.".format(search_chr)
+        )
+        search_chr = search_chr[3:]
+
+    # Ensure proper read group (RG) information
+    tp = infile.header.to_dict()
+    sampleID = os.path.splitext(os.path.basename(bamFile))[0]
+    tp.update({'RG': [{
+        'SM': sampleID,
+        'ID': sampleID,
+        'LB': "0.1",
+        'PL': "ILLUMINA",
+        'PU': sampleID
+    }]})
+
+    outfile = pysam.AlignmentFile(
+        out + "/Bam/" + id + "_" + search_chr + ".filter.bam",
+        "wb",
+        header=tp
+    )
+
+    for s in infile.fetch(search_chr):
+        if s.has_tag("NM"):
+            val = s.get_tag("NM")
+        elif s.has_tag("nM"):
+            val = s.get_tag("nM")
+        else:
+            continue
+
+        if val < max_mismatch:
+            outfile.write(s)
+
+    infile.close()
+    outfile.close()
+
+    os.system(samtools + " index " +
+              out + "/Bam/" + id + "_" + search_chr + ".filter.bam")
+
+    # Add "chr" prefix if needed
+    if not has_chr_prefix:
+        addChr(out + "/Bam/" + id + "_" + search_chr + ".filter.bam", samtools)
+
+    return out + "/Bam/" + id + "_" + search_chr + ".filter.bam"
 
 
-	for s in infile.fetch(search_chr):  
-		#print(str(s.query_length)  + ":" + str(s.get_tag("AS")) + ":" + str(s.get_tag("NM")))
-		if s.has_tag("NM"):
-			val= s.get_tag("NM")
-		if s.has_tag("nM"):
-			val= s.get_tag("nM")                  
-		if val < max_mismatch:
-			outfile.write(s)
-	infile.close()
-	outfile.close()
+def robust_get_tag(read, tag_name):
+    # Safe retrieval of BAM tags
+    try:
+        return read.get_tag(tag_name)
+    except KeyError:
+        return "NotFound"
 
-	os.system(samtools + " index " +  out + "/Bam/" + id+ "_"  + chr + ".filter.bam")
-	if cnt ==0:
-		addChr(out + "/Bam/" +  id+ "_" + chr+ ".filter.bam", samtools)
-	bamfile = out + "/Bam/" +  id+ "_" + chr+ ".filter.bam"
-	return(bamfile)
-	#args.bam_filter = args.out + "/Bam/" + args.chr + ".filter.bam"
-
-
-def robust_get_tag(read, tag_name):  
-	try:  
-		return read.get_tag(tag_name)
-	except KeyError:
-		return "NotFound"
 
 def runCMD(cmd):
-	output = os.system(cmd)
-	if output == 0:
-		return(region)
-	#process = subprocess.run(cmd, shell=True, stdout=open(args.logfile, 'w'), stderr=open(args.logfile,'w'))
+    # Execute a shell command
+    output = os.system(cmd)
+    if output == 0:
+        return region
