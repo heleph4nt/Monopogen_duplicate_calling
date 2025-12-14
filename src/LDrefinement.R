@@ -407,63 +407,86 @@ somaticLD <- function(mat=NULL, svm=NULL,  dir=NULL, region=NULL, min_size=50){
 # 19-end genotype at single cell level 
 # dt <- fread("/rsrch1/bcb/kchen_group/jdou/Monopogen/dev/chr20:1000000-2000000.gl.filter.hc.cell.mat.gz")
 
+##read the compressed genotype matrix file
 dt <- fread(mat_gz)
 dt <- data.frame(dt)
-dt$V10[dt$V10=="nan"] <- ".|."
+##Replace missing genotypes labeled as "nan" with standard missing genotype "./."
+dt$V10[dt$V10=="nan"] <- ".|." 
 
-### remove INDELs ###
+### remove INDELs ( keep only SNVs) ###
 lst <-c()
-for(i in seq(1,nrow(dt),1)){
-  ref_len <- nchar(dt[i,3])
+for(i in seq(1,nrow(dt),1)){ ##loop over all variants
+  ref_len <- nchar(dt[i,3])  
   alt_len <- nchar(dt[i,4])
-  if(ref_len==1 & alt_len==1){
+  if(ref_len==1 & alt_len==1){  ##keep the variant only if both allelles are SNVs
       lst <-c(lst,i)
   }
 }
-dt <- dt[lst,]
+dt <- dt[lst,]  ##subset the data to keep only SNVs
+
+##---------------------------------------------------------
+##Assign unique row names to each variant
+##Format: chr:pos:ref:alt
+##--------------------------------------------------------
 
 rownames(dt) <- paste0(dt$V1,":",dt$V2,":",dt$V3,":",dt$V4)
+
+## print the file path being read (for logging/debugging)
 
 print(paste0(outdir,region,".cell_snv.cellID.filter.csv"))
 cellName <- read.csv(file=paste0(outdir,region,".cell_snv.cellID.filter.csv"),header=T)
 cellName <- cellName[,2]
 
+## Ensure quality metric columns are numeric
 for(j in seq(11,18,1)){
   dt[,j] <- as.numeric(dt[,j])
 }
+
+## creat variant-level metadata table
 meta <- dt[,1:18]
 colnames(meta) <-c("chr","pos","ref","alt","Dep","dep1","dep2","dep3","dep4",
 	"genotype","QS","VDB","RPB","MQB","BQB","MQSB","SGB","MQ0F")
 
+#--------------------------------------------------
+#Initialize somatic refinement tables
+#--------------------------------------------------
 
+LDrefine_somatic <- meta #Copy metadata for downstream somatic analysis
+mut_mat <- dt  #Keep full matrix including single-cell genotypes
+LDrefine_somatic <- as.data.frame(LDrefine_somatic)  #Ensure LDrefine_somatic is a data.frame
+LDrefine_somatic$dep_ref_new <-0 #Total reference read counts across cells
+LDrefine_somatic$dep_alt_new <-0 #Total alternative read counts across cells
+LDrefine_somatic$cell_ref <-0 #Number of cells with only reference reads
+LDrefine_somatic$cell_alt <-0  #Number of cells with only alternative reads
+LDrefine_somatic$cell_ref_alt <-0 #Number of cells with both reference and alternative reads
 
+#Aggregate single-cell evidence per variant
 
-LDrefine_somatic <- meta 
-mut_mat <- dt 
-LDrefine_somatic <- as.data.frame(LDrefine_somatic)
-LDrefine_somatic$dep_ref_new <-0
-LDrefine_somatic$dep_alt_new <-0
-LDrefine_somatic$cell_ref <-0
-LDrefine_somatic$cell_alt <-0
-LDrefine_somatic$cell_ref_alt <-0
-for(i in seq(1, nrow(mut_mat),1)){
+for(i in seq(1, nrow(mut_mat),1)){   #Loop over each variant (row)
   N_wild <- 0 
   N_mut <- 0 
-  vec <- mut_mat[i,seq(19, ncol(mut_mat),1)]
-  sta <- unname(unlist(vec))
-  sta <- sta[sta!="0/0"]
+  vec <- mut_mat[i,seq(19, ncol(mut_mat),1)] #Extract single-cell genotype columns (19 to end)
+  sta <- unname(unlist(vec))  #Convert to a simple character vector
+  sta <- sta[sta!="0/0"] #Remove homozygous reference cells ("0/0")
   if(length(sta)>1){
-    sta <- colsplit(sta,"/",c("ref","alt"))
-    LDrefine_somatic$dep_ref_new[i] <- sum(sta$ref) 
-    LDrefine_somatic$dep_alt_new[i] <- sum(sta$alt)
-    LDrefine_somatic$cell_ref[i] <- length(which(sta$ref>0 & sta$alt==0))
-    LDrefine_somatic$cell_alt[i] <- length(which(sta$ref==0 & sta$alt>0)) 
-    LDrefine_somatic$cell_ref_alt[i] <- length(which(sta$ref>0 & sta$alt>0)) 
+
+    #Split read counts into reference and alternative components
+
+    sta <- colsplit(sta,"/",c("ref","alt")) 
+    LDrefine_somatic$dep_ref_new[i] <- sum(sta$ref) #Sum reference reads across all cells
+    LDrefine_somatic$dep_alt_new[i] <- sum(sta$alt)  #Sum alternative reads across all cells
+    LDrefine_somatic$cell_ref[i] <- length(which(sta$ref>0 & sta$alt==0))  #Count cells supporting only reference allele
+    LDrefine_somatic$cell_alt[i] <- length(which(sta$ref==0 & sta$alt>0)) #Count cells supporting only alternative allele
+    LDrefine_somatic$cell_ref_alt[i] <- length(which(sta$ref>0 & sta$alt>0)) #Count cells supporting both alleles (heterozygous / mixed)
   }
 }
 
-LDrefine_somatic$dep_ref_samtools <- LDrefine_somatic$dep1 + LDrefine_somatic$dep2 
-LDrefine_somatic$dep_alt_samtools <- LDrefine_somatic$dep3 + LDrefine_somatic$dep4
+#---------------------------------------------------
+#Add bulk read-depth estimates (samtools-style)
+#---------------------------------------------------
+
+LDrefine_somatic$dep_ref_samtools <- LDrefine_somatic$dep1 + LDrefine_somatic$dep2 #Total reference reads from bulk data
+LDrefine_somatic$dep_alt_samtools <- LDrefine_somatic$dep3 + LDrefine_somatic$dep4 #Total alternative reads from bulk data
 
 
 write.csv(LDrefine_somatic, file=paste0(outdir,region,".allSNVs.csv"),quote=FALSE,row.names = FALSE)
