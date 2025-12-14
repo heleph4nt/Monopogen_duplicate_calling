@@ -97,9 +97,9 @@ def germline(args):
 
             # Define region/job ID
             if len(record) == 1:
-                jobid = record[0]
+                jobid = record[0] # region looks like: chr1
             elif len(record) == 3:
-                jobid = record[0] + ":" + record[1] + "-" + record[2]
+                jobid = record[0] + ":" + record[1] + "-" + record[2] # region looks like: chr1:1029380-12947857
 
             # BAM list for this chromosome
             bam_filter = args.out + "/Bam/" + record[0] + ".filter.bam.lst"
@@ -119,35 +119,43 @@ def germline(args):
             )
 
             # Step 1: pooled mpileup to generate genotype likelihoods
+            # This treats the sample as one total bulk sample, and not single cells.
             cmd1 = (
                 samtools + " mpileup -b " + bam_filter +
-                " -f " + args.reference +
-                " -r " + jobid +
-                " -q 20 -Q 20 --incl-flags 0 --excl-flags 0 " +
-                "-t DP -d 10000000 -v "
+                " -f " + args.reference + # reference: used for variant calling
+                " -r " + jobid + # region restriction
+                " -q 20 -Q 20" + # minimum mapping quality and minimum base quality
+                "--incl-flags 0 --excl-flags 0 " + # do not require or restrict any flags (like paired read etc.)
+                "-t DP -d 10000000 -v " #-t: adds read depth in the INFO field -d maximum per-position depth: set very high so don't exclude anything -v output vcf format
             )
             cmd1 += (
-                " | " + bcftools + " view | " +
-                bcftools + " filter -e 'REF !~ \"^[ATGC]$\"' | " +
-                bcftools + " norm -m-both -f " + args.reference
+                " | " + bcftools + " view | " + # cleans the output
+                bcftools + " filter -e 'REF !~ \"^[ATGC]$\"' | " + # Excludes variants where the reference allele is not exactly one of A, T, G, or C
+                bcftools + " norm -m-both -f " + args.reference # Normalizes variants: makes the representation normal; -m-both means that if there are multiple alleles they are split into separate lines. InDels are also formatted (left-aligned) according to the reference. The bases that are the same in the reference are trimmed 
             )
             cmd1 += (
-                " | grep -v \"<X>\" | " + bgzip +
-                " -c > " + args.out + "/germline/" +
-                jobid + ".gl.vcf.gz"
+                " | grep -v \"<X>\" | " + # removes any records with <X> in them which represents placeholders
+                bgzip +" -c > " + args.out + "/germline/" + jobid + ".gl.vcf.gz" # Compresses the final VCF using bgzip, producing an indexed-compatible .vcf.gz
             )
+            # generates likelihoods in the .gl.vcf.gz file
+
 
             # Step 2: LD-based genotype refinement using Beagle
+            # Uses a reference haplotype panel
+            # Reference haplotype panel: A dataset that contains phased haplotypes, i.e. alleles that occurr together along a chromosome
+            # 
             cmd3 = (
                 java + " -Xmx20g -jar " + beagle +
                 " gl=" + out + "/germline/" + jobid + ".gl.vcf.gz" +
                 " ref=" + imputation_vcf +
                 " chrom=" + record[0] +
                 " out=" + out + "/germline/" + jobid + ".gp " +
-                "impute=false modelscale=2 gprobs=true niterations=0"
+                "impute=false modelscale=2 gprobs=true niterations=0" # impute=false: no filling in of missing things etc. gprobs: genotype probabilities. Just 1 run (niterations=0) modelscale=2 for low coverage data
             )
+            # output: probabilities of the genotypes instead of likelihoods
 
-            # Step 3: phasing
+            # Step 3: phasing: determines which of the variants belong to the same chromosome (haplotype) i.e. mother/father
+            # the difference to the previous step is that we use gt instead of gl; which means that we use 'hard' genotypes, as in we take the most probable genotype at each site.
             cmd5 = (
                 java + " -Xmx20g -jar " + beagle +
                 " gt=" + out + "/germline/" + jobid + ".germline.vcf" +
@@ -156,7 +164,7 @@ def germline(args):
                 " out=" + out + "/germline/" + jobid + ".phased " +
                 "impute=false modelscale=2 gprobs=true niterations=0"
             )
-            cmd5 += "\nrm " + out + "/germline/" + jobid + ".germline.vcf"
+            cmd5 += "\nrm " + out + "/germline/" + jobid + ".germline.vcf" # delete the vcf file
 
             # Write job script
             f_out = open(out + "/Script/runGermline_" + jobid + ".sh", "w")
