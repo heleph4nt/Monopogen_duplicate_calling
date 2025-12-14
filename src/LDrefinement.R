@@ -481,9 +481,7 @@ for(i in seq(1, nrow(mut_mat),1)){   #Loop over each variant (row)
   }
 }
 
-#---------------------------------------------------
-#Add bulk read-depth estimates (samtools-style)
-#---------------------------------------------------
+#---------------------------------Add bulk read-depth estimates (samtools-style)-----------------------------------#
 
 LDrefine_somatic$dep_ref_samtools <- LDrefine_somatic$dep1 + LDrefine_somatic$dep2 #Total reference reads from bulk data
 LDrefine_somatic$dep_alt_samtools <- LDrefine_somatic$dep3 + LDrefine_somatic$dep4 #Total alternative reads from bulk data
@@ -493,74 +491,89 @@ write.csv(LDrefine_somatic, file=paste0(outdir,region,".allSNVs.csv"),quote=FALS
 
 
 # LDrefine_somatic <- read.csv(file="chr20.allSNVs.csv",header=T)
+# Assign rownames as chr:pos:ref:alt for unique variant identifiers
 # rownames(LDrefine_somatic) <- paste0(LDrefine_somatic$chr,":", LDrefine_somatic$pos,":", LDrefine_somatic$ref,":",LDrefine_somatic$alt)
 
 ### for multi-allele locus, only keep the germline variants. 
 
-pos_multiAllele <- which(LDrefine_somatic$pos%in% names(which(table(LDrefine_somatic$pos)>1)))
+#------------------Filter multi-allelic loci: only keep germline variants----------------------------#
 
-multiAllele <-  LDrefine_somatic[pos_multiAllele,]
-biAllele_pass <- rownames(LDrefine_somatic)[!rownames(LDrefine_somatic)%in%rownames(multiAllele)]
-multiAllele_pass <- rownames(multiAllele[which(multiAllele$genotype!=".|."),])
-LDrefine_somatic_pass <- LDrefine_somatic[rownames(LDrefine_somatic)%in%c(biAllele_pass, multiAllele_pass ),]
+pos_multiAllele <- which(LDrefine_somatic$pos%in% names(which(table(LDrefine_somatic$pos)>1))) #Identify positions with more than one variant (multi-allelic)
 
+multiAllele <-  LDrefine_somatic[pos_multiAllele,] #Extract all variants at multi-allelic positions
+biAllele_pass <- rownames(LDrefine_somatic)[!rownames(LDrefine_somatic)%in%rownames(multiAllele)]  #Keep bi-allelic positions (all other positions)
+multiAllele_pass <- rownames(multiAllele[which(multiAllele$genotype!=".|."),]) #From multi-allelic positions, keep only variants with defined genotype (not ".|.")
+LDrefine_somatic_pass <- LDrefine_somatic[rownames(LDrefine_somatic)%in%c(biAllele_pass, multiAllele_pass ),] #Combine bi-allelic and selected multi-allelic variants
+
+#Remove any remaining positions with multiple variants (safety check)
 rm2 <- names(which(table(LDrefine_somatic_pass[,c("pos")])>1))
 LDrefine_somatic_pass  <- LDrefine_somatic_pass[!LDrefine_somatic_pass$pos%in%rm2,]
 
 #### we remove loci showing sequencing depth discordance between samtools and motif-based searching 
 cutoff <- 1000000  # this cut-off generally works well 
-rm3 <- LDrefine_somatic_pass[abs(LDrefine_somatic_pass$dep_alt_new-LDrefine_somatic_pass$dep_alt_samtools)>cutoff,]
-rm3 <- rownames(rm3[rm3$genotype==".|.",])
-LDrefine_somatic_pass <- LDrefine_somatic_pass[!rownames(LDrefine_somatic_pass)%in%rm3,]
+rm3 <- LDrefine_somatic_pass[abs(LDrefine_somatic_pass$dep_alt_new-LDrefine_somatic_pass$dep_alt_samtools)>cutoff,]  #Identify loci where difference between single-cell and samtools alt depth exceeds cutoff
+rm3 <- rownames(rm3[rm3$genotype==".|.",])  #Keep only those with missing genotype (".|.") to remove low-confidence
+LDrefine_somatic_pass <- LDrefine_somatic_pass[!rownames(LDrefine_somatic_pass)%in%rm3,] #Remove these loci from filtered dataset
 
-
+#-----------------------Update meta and dt matrices to keep only passed variants-------------------------#
 meta <- meta[rownames(meta)%in%rownames(LDrefine_somatic_pass),]
 
 dt <- dt[rownames(dt)%in%rownames(LDrefine_somatic_pass), ]
 
+#Replace meta depth columns with updated values from filtered dataset
 meta$dep2 <- LDrefine_somatic_pass$dep1 + LDrefine_somatic_pass$dep2
 meta$dep4 <- LDrefine_somatic_pass$dep3 + LDrefine_somatic_pass$dep4
 meta$dep1 <- LDrefine_somatic_pass[rownames(meta),c("dep_ref_new")]
 meta$dep3 <- LDrefine_somatic_pass[rownames(meta),c("dep_alt_new")]
 
-mutation_block <- SNV_block(summary=meta)
-svm_in <- SVM_prepare(mutation_block)
-svm_out <- SVM_train(label =svm_in,dir=outdir, region=region)
+#------------------------------Prepare mutation blocks and SVM input/output----------------------#
+mutation_block <- SNV_block(summary=meta) #summarize mutations per variant
+svm_in <- SVM_prepare(mutation_block) #prepare SVM input
+svm_out <- SVM_train(label =svm_in,dir=outdir, region=region) #train SVM model
+
 
 
 ### phase the allele at single cell resolution 
-dt_phase <- dt 
+dt_phase <- dt  #copy original genotype matrix
 for(i in seq(1, nrow(dt),1)){
-  vec <- as.character(dt[i,]) 
-  dt_phase[i, seq(19, ncol(dt_phase),1)] <- "0|0"
+  vec <- as.character(dt[i,])  #extract current row
+  dt_phase[i, seq(19, ncol(dt_phase),1)] <- "0|0" #initialize single-cell genotypes to reference
+  
+  #Find non-reference genotypes
   #if(vec[10]==".|."){
   pos <- which(vec!="0/0") 
-  pos <- pos[pos>18]
+  pos <- pos[pos>18]  #restrict to single-cell columns
+ #Split genotype into ref and alt counts
   pos_split <- colsplit(vec[pos],"/",c("ref","alt"))
-  pos_split[pos_split>0] <- 1
+  pos_split[pos_split>0] <- 1 #normalize counts to presence/absence
+
+  #Phase genotype depending on bulk genotype
   if(vec[10]==".|." | vec[10]=="0|1" | vec[10]=="1|1"){
       pos_split <- paste0(pos_split[,1],"|", pos_split[,2])
   }
   if(vec[10]=="1|0"){
       pos_split <- paste0(pos_split[,2],"|", pos_split[,1])
   }
-  dt_phase[i, pos] <- pos_split
+  dt_phase[i, pos] <- pos_split #Update phased genotypes in matrix
   #}
 }
 
+#Run somatic LD refinement
 final <- somaticLD(mat=dt_phase, svm=svm_out, dir=outdir, region=region)
 
+#-----------------------------Prepare final output matrices---------------------#
 
-mut_mat <- dt[rownames(final$out),]
+mut_mat <- dt[rownames(final$out),] #Subset original dt to keep only variants in the final result
 colnames(mut_mat) <-c(colnames(meta),cellName)
 
+# Update LDrefine_somatic with read depth and B-allele frequency (BAF)
 tp <- LDrefine_somatic_pass[rownames(final$LDrefine_somatic),]
 final$LDrefine_somatic$Depth_ref <- tp$dep_ref_new
 final$LDrefine_somatic$Depth_alt <- tp$dep_alt_new 
 final$LDrefine_somatic$Depth_total <- tp$dep_ref_new + tp$dep_alt_new 
 final$LDrefine_somatic$BAF_alt <- tp$dep_alt_new/(tp$dep_ref_new + tp$dep_alt_new + 1)
 
-
+#Save final outputs
 write.csv(final$LDrefine_somatic,   file=paste0(outdir,region,".putativeSNVs.csv"),quote=FALSE,row.names = FALSE)
 write.csv(final$LDrefine_germline2, file=paste0(outdir,region,".germlineTwoLoci_model.csv"),quote=FALSE, row.names = FALSE)
 write.csv(final$LDrefine_germline3, file=paste0(outdir,region,".germlineTrioLoci_model.csv"),quote=FALSE, row.names = FALSE)
