@@ -1,68 +1,86 @@
-args = commandArgs(trailingOnly=TRUE)
+args = commandArgs(trailingOnly=TRUE)   # Read command-line arguments
 
-library(data.table)
-library(e1071)
-library(ggplot2)
-library(reshape2)
-options(warn=-1)
+library(data.table)    # Fast I/O and large table handling
+library(e1071)         # SVM implementation
+library(ggplot2)       # Visualization
+library(reshape2)      # Data reshaping utilities
+options(warn=-1)       # Suppress warnings
 
-mat_gz <- args[1]
-outdir <- args[2]
-region <- args[3]
+#------------------------ Input arguments------------------------------
 
-### count SNV chuck regions that no germline SNVs included.
-SNV_block <-function(summary=NULL){
-	block <- 1
-	last <- ".|."
-	summary$region <- 0
-	for(i in seq(1,nrow(summary),1)){
-		if(summary[i,10]==".|."){
-			if(last==".|." | last=="0|0"){;}
-			else{	
-				block <- block + 1
-			}
-			summary$region[i] <- block
+mat_gz <- args[1]      # SNV-by-cell genotype matrix (gzipped)
+outdir <- args[2]      # Output directory
+region <- args[3]      # Genomic region label
+
+#------------------------ Function definitions ------------------------
+
+### split the genome into blocks based on germline SNV patterns
+SNV_block <-function(summary=NULL){ # Takes a SNV metadata table (summary) as input
+	block <- 1 # Initialize block counter
+	last <- ".|." # Tracks the previous genotype; starts as missing germline
+	summary$region <- 0 # Adds a new column region to store block IDs
+	for(i in seq(1,nrow(summary),1)){ # Iterate through each SNV in genomic order
+
+		# New block when switching from germline to non-germline pattern
+		if(summary[i,10]==".|."){ # only consider positions without germline variants.
+			if(last==".|." | last=="0|0"){;} # continue current block
+# If previous SNV was also non-germline or homozygous reference, stay in the same block
+			else{	block <- block + 1 } # else, start a new block: transition from germline → non-germline
+			summary$region[i] <- block # Assign current SNV to the current block
 		}
-		last <- summary[i,10]
+		last <- summary[i,10] # Update last genotype
 	}
-	return(summary)
+	return(summary) # Return the summary table with block assignments
 }
 
-### generate positive and negative labels based on position distribution 
-SVM_prepare <-function(x=NULL){
-	svm<-list()
-  cutoff <- 10 
-	region_cnt <- table(x$region)
-	filter <- names(region_cnt)[region_cnt>=3]
-  neg_index <- which((x$region%in% filter & x$genotype==".|." &  x$dep4<=cutoff))
-	neg <- x[neg_index,]
-  pos_index <- which(!x$genotype==".|.")
-	pos <- x[pos_index,]
+### Generate positive / negative labels for SVM training
+# Build training and testing sets for the SVM
+
+SVM_prepare <-function(x=NULL){ # Input: SNV metadata table with block assignments
+  svm<-list() # Initialize list to hold positive, negative, and test sets
+  cutoff <- 10 # Maximum allowed alt-read depth for negatives (controls noise)
+
+	# Identify blocks with sufficient SNVs
+	region_cnt <- table(x$region) # Count SNVs per block
+	filter <- names(region_cnt)[region_cnt>=3] # Keep blocks with ≥3 SNVs
+
+	# Negative examples: homozygous reference, low alt depth
+	neg_index <- which((x$region%in% filter & x$genotype==".|." &  x$dep4<=cutoff)) # Select negative examples
+	neg <- x[neg_index,] # Subset negative examples
+
+	# Positive examples: non-reference genotypes
+	pos_index <- which(!x$genotype==".|.") # Select positive examples
+	pos <- x[pos_index,] # Subset positive examples
+
+# Test set: remaining SNVs
 	svm$neg <- neg 
 	svm$pos <- pos
-	svm$test <- x[-c(pos_index,neg_index),]
-	return(svm)
+	svm$test <- x[-c(pos_index,neg_index),] # Remaining SNVs for testing
+	return(svm) # Return list with positive, negative, and test sets
 }
 
-### SVM trainning on 8 features, some features may not informative (depending on sequencing platforms) 
+### Train SVM using variant-level quality metrics
 SVM_train <- function(label=NULL, dir=NULL, region=NULL){
 
+	# Standard variant QC features
 	features_all <-c("QS", "VDB", "SGB", "RPB", "MQB", "MQSB", "BQB", "MQ0F")
+
 	label$pos <- as.data.frame(label$pos)
 	label$pos[label$pos=="None"] <- NA
 
-	# remove features that are totally missed. 
+# Remove features missing entirely
 	features<-c()
 	for(f in features_all){
-		if(all(is.na(label$pos[,f]))){;}
-		else{
+		if(!all(is.na(label$pos[,f]))){
 			features <-c(features,f)
 		}
 	}	
-	# using median values to replace the missing values 
+
+	# Median imputation for missing values
 	train_x_pos <- impute(as.matrix(data.matrix(label$pos[,features])), what="median")
 
-	# using the minior value of QS 
+
+# Flip QS probabilities for consistency
 	vec <- train_x_pos[,colnames(train_x_pos)=="QS"]
 	vec[vec>0.5] <- 1- vec[vec>0.5]
 	train_x_pos[,1] <- vec
@@ -70,40 +88,51 @@ SVM_train <- function(label=NULL, dir=NULL, region=NULL){
 	label$neg <- as.data.frame(label$neg)
 	label$neg[label$neg=="None"] <- NA
 	train_x_neg <- impute(as.matrix(data.matrix(label$neg[,features])), what="median")
-	vec <- train_x_neg[,colnames(train_x_neg)=="QS"]
+  
+  vec <- train_x_neg[,colnames(train_x_neg)=="QS"]
 	vec[vec>0.5] <- 1- vec[vec>0.5]
 	train_x_neg[,1] <- vec
 	
 	label$test <- as.data.frame(label$test)
 	label$test[label$test=="None"] <- NA
 	test_x <- impute(as.matrix(data.matrix(label$test[,features])), what="median")
+
 	vec <- test_x[,colnames(test_x)=="QS"]
 	vec[vec>0.5] <- 1- vec[vec>0.5]
 	test_x[,1] <- vec
+
 	train_y_pos <- rep("POS", nrow(train_x_pos))
 	train_y_neg <- rep("NEG", nrow(train_x_neg))
 	
-	# generate feature distribution plot to confirm whether SVM works or not
+# Plot feature distributions for QC
 	pdf(file=paste0(dir,"svm_feature.", region, ".pdf"),width=4,height=5)
 	for(i in features){
-	  plt_dt <- data.frame("Val"=c(train_x_pos[,i], train_x_neg[,i]),"Label"=c(train_y_pos,train_y_neg))
-	  p <- ggplot(aes(fill=Label, y=Val, x=Label),data=plt_dt) + geom_boxplot(position="dodge", alpha=0.5) + 
+	  plt_dt <- data.frame("Val"=c(train_x_pos[,i], train_x_neg[,i]),
+	                       "Label"=c(train_y_pos,train_y_neg))
+	  p <- ggplot(aes(fill=Label, y=Val, x=Label),data=plt_dt) +
+	    geom_boxplot(position="dodge", alpha=0.5) + 
 	    ylab(i) + theme_classic()
 	  print(p)
 	}
 	dev.off()
   
 
+	# Train SVM classifier
 	model <- svm(as.matrix(rbind(train_x_pos, train_x_neg)), 
-				 as.factor(c(train_y_pos,train_y_neg)), 
-				 probability=TRUE)
+	             as.factor(c(train_y_pos,train_y_neg)), 
+	             probability=TRUE)
+
+	# Predict probabilities for test variants
 	pred <- predict(model, as.matrix(test_x), probability=TRUE)
-	prob <- attr(pred, "probabilities")
-	prob <-as.data.frame(prob)
+	prob <- as.data.frame(attr(pred, "probabilities"))
+
 	label$test$POS <- prob$POS
 	label$test$NEG <- prob$NEG
 	return(label)
 }
+
+#-------------------------------- LD refinement functions ---------------------------------------
+
 
 
 twoloci <- function(mat=NULL, germIndex=NULL, somaticIndex=NULL,dis=NULL){
