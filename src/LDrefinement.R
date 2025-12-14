@@ -60,35 +60,41 @@ SVM_prepare <-function(x=NULL){ # Input: SNV metadata table with block assignmen
 }
 
 ### Train SVM using variant-level quality metrics
-SVM_train <- function(label=NULL, dir=NULL, region=NULL){
+SVM_train <- function(label=NULL, dir=NULL, region=NULL){ # Input: list with positive, negative, and test sets
 
-	# Standard variant QC features
-	features_all <-c("QS", "VDB", "SGB", "RPB", "MQB", "MQSB", "BQB", "MQ0F")
+	# Standard variant-level QC metrics (from samtools/bcftools)
+	features_all <-c("QS", "VDB", "SGB", "RPB", "MQB", "MQSB", "BQB", "MQ0F") 
 
-	label$pos <- as.data.frame(label$pos)
-	label$pos[label$pos=="None"] <- NA
+# Positive set
+
+	label$pos <- as.data.frame(label$pos) # Ensure positive set is a data.frame
+	label$pos[label$pos=="None"] <- NA # Replace "None" with NA
 
 # Remove features missing entirely
-	features<-c()
-	for(f in features_all){
-		if(!all(is.na(label$pos[,f]))){
-			features <-c(features,f)
+	features<-c() # Initialize feature list
+	for(f in features_all){ # Iterate through all features
+		if(!all(is.na(label$pos[,f]))){ # Keep feature if not all values are NA
+			features <-c(features,f) # Append valid feature
 		}
 	}	
 
-	# Median imputation for missing values
+# Convert to numeric matrix and impute missing values using medians
 	train_x_pos <- impute(as.matrix(data.matrix(label$pos[,features])), what="median")
 
-
-# Flip QS probabilities for consistency
-	vec <- train_x_pos[,colnames(train_x_pos)=="QS"]
-	vec[vec>0.5] <- 1- vec[vec>0.5]
-	train_x_pos[,1] <- vec
+# Symmetrize QS scores (probabilities should be ≤ 0.5)
+	vec <- train_x_pos[,colnames(train_x_pos)=="QS"] # Extract QS column
+	vec[vec>0.5] <- 1- vec[vec>0.5] # Symmetrize QS values
+	train_x_pos[,1] <- vec # Update QS column
 	
-	label$neg <- as.data.frame(label$neg)
-	label$neg[label$neg=="None"] <- NA
+# Negative set
+
+	label$neg <- as.data.frame(label$neg) # Ensure negative set is a data.frame
+	label$neg[label$neg=="None"] <- NA # Replace "None" with NA
+
+# Convert to numeric matrix and impute missing values using medians
 	train_x_neg <- impute(as.matrix(data.matrix(label$neg[,features])), what="median")
-  
+
+# Symmetrize QS scores
   vec <- train_x_neg[,colnames(train_x_neg)=="QS"]
 	vec[vec>0.5] <- 1- vec[vec>0.5]
 	train_x_neg[,1] <- vec
@@ -131,8 +137,7 @@ SVM_train <- function(label=NULL, dir=NULL, region=NULL){
 	return(label)
 }
 
-#-------------------------------- LD refinement functions ---------------------------------------
-
+#------------------------ LDrefinement functions  ------------------------
 
 
 twoloci <- function(mat=NULL, germIndex=NULL, somaticIndex=NULL,dis=NULL){
