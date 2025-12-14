@@ -249,15 +249,15 @@ def BamFilter(myargs):
     )
 
     for s in infile.fetch(search_chr):
-        if s.has_tag("NM"):
+        if s.has_tag("NM"): # Edit distance tag: The Levenstein distance between read and reference: which means how many bases are different between read and reference
             val = s.get_tag("NM")
         elif s.has_tag("nM"):
             val = s.get_tag("nM")
         else:
-            continue
+            continue # we ignore all of the reads that don't have any information about Levenstein distance.
 
-        if val < max_mismatch:
-            outfile.write(s)
+        if val < max_mismatch: # if the distance is too large, we ignore it.
+            outfile.write(s) 
 
     infile.close()
     outfile.close()
