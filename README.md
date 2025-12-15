@@ -2,6 +2,31 @@
 
 ## Medical genomics section (new-ish readme)
 
+### To make it work in a conda environment
+
+```{bash}
+cp -r  /data/Training-MG/files/data/Project1_SNVcalling_mesothelioma/Monopogen Desktop
+conda create -n Monopogen samtools=1.2 bcftools=1.8
+conda activate Monopogen
+mkdir tmp
+cd tmp
+apt-get download libncurses5
+mkdir -p $CONDA_PREFIX/lib
+dpkg-deb -x libncurses5_6.3-2ubuntu0.1_amd64.deb $CONDA_PREFIX
+cd $CONDA_PREFIX/lib
+ln -s x86_64-linux-gnu/libncurses.so.5.9 libncurses.so.5
+cd ~/tmp/
+apt-get download libtinfo5
+dpkg-deb -x libtinfo5_6.3-2ubuntu0.1_amd64.deb $CONDA_PREFIX
+cd $CONDA_PREFIX/lib
+ln -s x86_64-linux-gnu/libtinfo.so.5.9 libtinfo.so.5
+cd ~
+cd Desktop/
+cd Monopogen/
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+cp apps/libcrypto.so.1.0.0 $CONDA_PREFIX/lib/
+```
+
 ### For making this work on a macos laptop.
 
 ```{bash}
